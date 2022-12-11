@@ -18,9 +18,11 @@ export const DeviceSelector: React.FC<Props> = ({devices, onSelected}) => {
           labelId="select-input-device"
           id="inputDevice"
           label="InputDevice"
+          value={""}
           onChange={(event) => onSelected(event.target.value as string)}
         >
-          {inputDevices.map((info: DeviceInfo) => <MenuItem value={info.deviceId}>{info.label}</MenuItem>)}
+          <MenuItem value={""} disabled><em>None</em></MenuItem>
+          {inputDevices.map((info: DeviceInfo) => <MenuItem key={info.deviceId} value={info.deviceId}>{info.label}</MenuItem>)}
         </S.DeviceSelect>
       </FormControl>
     </S.DeviceSelector>
