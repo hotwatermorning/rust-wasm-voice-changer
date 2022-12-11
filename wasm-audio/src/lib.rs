@@ -144,11 +144,13 @@ impl WasmProcessor {
 
   pub fn set_feedback_amount(&mut self, value: f32) {
     log!("wet-amount: {}, feedback: {}, length: {}", self.delay.wet_amount, self.delay.feedback_amount, self.delay.length);
-    self.delay.feedback_amount = value;
+
+    self.delay.feedback_amount = std::cmp::min(value, 0.95);
   }
 
   pub fn set_delay_length(&mut self, value: f32) {
-    let len = unsafe { (value * self.sample_rate as f32).to_int_unchecked::<usize>() };
+    let mut len = unsafe { (value * self.sample_rate as f32).to_int_unchecked::<usize>() };
+    len = std::cmp::max(len, 10);
     self.delay = DelayLine::new(len, self.delay.wet_amount, self.delay.feedback_amount);
   }
 }
