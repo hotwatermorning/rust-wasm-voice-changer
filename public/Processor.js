@@ -77,60 +77,29 @@ class Processor extends AudioWorkletProcessor {
 
     // inputSamples holds an array of new samples to process.
     const inputSamples = inputChannels[0];
-    const outputSamples = outputChannels[0];
+    const outputSamplesL = outputChannels[0];
+    const outputSamplesR = outputChannels[1];
     const len = inputSamples.length;
 
     for (let i = 0; i < len; ++i) {
-      outputSamples[i] = this.outputBuffer[i];
+      this.processBuffer[i] = inputSamples[i];
     }
 
-    const numToMove = this.numOutputBufferSamples - len;
-    for (let i = 0; i < numToMove; ++i) {
-      this.outputBuffer[i] = this.outputBuffer[i + len];
-    }
-    this.numOutputBufferSamples = numToMove;
+    this.levels.fill(0);
+    this.processor.process(this.processBuffer, len, this.levels);
 
-    for(let i = 0; i < len; ++i) {
-      this.processBuffer[this.numProcessBufferSamples + i] = inputSamples[i];
-    }
-    this.numProcessBufferSamples += len;
+    this.port.postMessage({
+      type: "update-levels",
+      inputLevel: this.levels[0],
+      outputLevel: this.levels[1],
+    });
 
-    // Once our buffer has enough samples, pass them to the Wasm processor.
-    if (this.numProcessBufferSamples >= this.blockSize && this.processor) {
-      const saved = new Array(this.blockSize);
-      for(let i = 0; i < this.blockSize; ++i) {
-        saved[i] = this.processBuffer[i];
-      }
-
-      this.levels.fill(0);
-
-      this.processor.process(this.processBuffer, this.levels);
-
-      // this.port.postMessage({
-      //   type: "update-levels",
-      //   inputLevel: this.levels[0],
-      //   outputLevel: this.levels[1],
-      // });
-
-      {
-        // push output buffer
-        const currentSize = this.numOutputBufferSamples;
-        for (let i = 0; i < this.blockSize; ++i) {
-          this.outputBuffer[currentSize + i] = this.processBuffer[i];
-        }
-        this.numOutputBufferSamples = currentSize + this.blockSize;
-      }
-
-      {
-        const numToMove = this.numProcessBufferSamples - this.blockSize;
-        for(let i = 0; i < numToMove; ++i) {
-          this.processBuffer[i] = this.processBuffer[i + this.blockSize];
-        }
-        this.numProcessBufferSamples = numToMove;
-      }
+    for (let i = 0; i < len; ++i) {
+      const sample = this.processBuffer[i];
+      outputSamplesL[i] = sample;
+      outputSamplesR[i] = sample;
     }
 
-    // Returning true tells the Audio system to keep going.
     return true;
   }
 }

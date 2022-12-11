@@ -112,7 +112,7 @@ impl WasmProcessor {
     d
   }
 
-  pub fn process(&mut self, buffer: &mut [f32], levels: &mut [f32]) {
+  pub fn process(&mut self, buffer: &mut [f32], length: usize, levels: &mut [f32]) {
 //    log!("len of levels: {}", levels.len());
 
     let omega = 440.0 * 2.0 * std::f32::consts::PI / self.sample_rate as f32;
@@ -122,7 +122,7 @@ impl WasmProcessor {
     let reduced_level = MIN_DECIBEL.max(self.input_level - LEVEL_REDUCTION_PER_SAMPLE * buffer.len() as f32);
     levels[0] = gain_to_decibel(*new_input_level_gain, MIN_DECIBEL).max(reduced_level);
 
-    for x in buffer.iter_mut() {
+    for x in buffer[..length].iter_mut() {
       *x = self.delay.process(*x);
       self.phase += omega;
       if self.phase >= 2.0 * std::f32::consts::PI {
