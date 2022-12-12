@@ -47,12 +47,16 @@ class Processor extends AudioWorkletProcessor {
       this.numProcessBufferSamples = 0;
       this.numOutputBufferSamples = this.outputBuffer.length;
       this.levels = new Float32Array(2).fill(0);
-    } else if(event.type === "set-wet-amount") {
-      // this.processor.set_wet_amount(event.value);
-    } else if(event.type === "set-feedback-amount") {
-      // this.processor.set_feedback_amount(event.value);
-    } else if(event.type === "set-delay-length") {
-      // this.processor.set_delay_length(event.value);
+    } else if(event.type === "set-dry-wet") {
+      this.processor.set_dry_wet(event.value);
+    } else if(event.type === "set-output-gain") {
+      this.processor.set_output_gain_decibel(event.value);
+    } else if(event.type === "set-pitch-shift") {
+      this.processor.set_pitch_shift(event.value);
+    } else if(event.type === "set-formant-shift") {
+      this.processor.set_formant_shift(event.value);
+    } else if(event.type === "set-envelope-order") {
+      this.processor.set_envelope_order(event.value);
     }
   }
 

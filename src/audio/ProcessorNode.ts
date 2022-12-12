@@ -78,17 +78,16 @@ export default class ProcessorNode extends AudioWorkletNode {
         inputLevel: event.data.inputLevel,
         outputLevel: event.data.outputLevel
       } as LevelMeterState);
-    } else if (event.type === "set-wet-amount") {
+    } else if (
+      event.type === "set-dry-wet" ||
+      event.type === "set-output-gain" ||
+      event.type === "set-pitch-shift" ||
+      event.type === "set-formant-shift" ||
+      event.type === "set-envelope-order"
+    ) {
       this.port.postMessage({
-          value: event.data.value
-      });
-    } else if (event.type === "set-feedback-amount") {
-      this.port.postMessage({
-          value: event.data.value
-      });
-    } else if (event.type === "set-delay-length") {
-      this.port.postMessage({
-          value: event.data.value
+        type: event.type,
+        value: event.data.value
       });
     }
   }

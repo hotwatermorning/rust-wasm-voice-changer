@@ -110,7 +110,7 @@ impl<T: Clone> RingBuffer<T> {
     let copy1 = std::cmp::min(buffer_length - self.write_pos, length);
 
     self.buffer[self.write_pos..self.write_pos + copy1].clone_from_slice(&src[0..copy1]);
-    
+
     if copy1 == length {
       self.write_pos += copy1;
       return true;
@@ -423,9 +423,25 @@ impl WasmProcessor {
     }
   }
 
-  // pub fn set_wet_amount(&mut self, value: f32) {
-  //   self.delay.wet_amount = value;
-  // }
+  pub fn set_dry_wet(&mut self, value: f32) {
+    self.dry_wet = value;
+  }
+
+  pub fn set_output_gain_decibel(&mut self, value: f32) {
+    self.output_gain_decibel = value;
+  }
+
+  pub fn set_pitch_shift(&mut self, value: f32) {
+    self.pitch = value;
+  }
+
+  pub fn set_formant_shift(&mut self, value: f32) {
+    self.formant = value;
+  }
+
+  pub fn set_envelope_order(&mut self, value: usize) {
+
+  }
 
   // pub fn set_feedback_amount(&mut self, value: f32) {
   //   log!("wet-amount: {}, feedback: {}, length: {}", self.delay.wet_amount, self.delay.feedback_amount, self.delay.length);

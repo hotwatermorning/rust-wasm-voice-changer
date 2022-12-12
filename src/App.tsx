@@ -55,7 +55,7 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
       />
       <SliderWithName
         name={"Formant Shift"}
-        parameterId={"pitch-shift"}
+        parameterId={"formant-shift"}
         onChangeParameter={props.onChangeParameter}
         defaultValue={0}
         min={-1}
@@ -121,22 +121,10 @@ function AudioControl() {
   }
 
   const changeParameter = (type: string, value: number) => {
-    if(type === "wet-amount") {
-      audioManager.node.port.postMessage({
-        type: "set-wet-amount",
-        value
-      });
-    } else if(type === "feedback-amount") {
-      audioManager.node.port.postMessage({
-        type: "set-feedback-amount",
-        value
-      });
-    } else if(type === "delay-length") {
-      audioManager.node.port.postMessage({
-        type: "set-delay-length",
-        value
-      });
-    }
+    audioManager.node.port.postMessage({
+      type: "set-" + type,
+      value
+    });   
   };
 
   // Audio already initialized. Suspend / resume based on its current state.
