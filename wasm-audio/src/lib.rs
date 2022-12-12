@@ -30,7 +30,6 @@ fn gain_to_decibel(gain: f32, min_decibel: f32) -> f32
   tmp.max(min_decibel)
 }
 
-const LEVEL_REDUCTION_PER_SAMPLE: f32 = 1.0 / 24000.0;
 const MIN_DECIBEL: f32 = -48.0;
 static mut MIN_DECIBEL_GAIN: f32 = 0.0;
 
@@ -239,6 +238,7 @@ pub struct WasmProcessor {
   envelope_order: usize,
   input_level: f32,
   output_level: f32,
+  level_reduction_per_sample: f32,
 }
 
 #[wasm_bindgen]
@@ -322,6 +322,7 @@ impl WasmProcessor {
       envelope_order: 5,
       input_level: MIN_DECIBEL,
       output_level: MIN_DECIBEL,
+      level_reduction_per_sample: MIN_DECIBEL / sample_rate as f32,
     };
 
     d
@@ -329,12 +330,15 @@ impl WasmProcessor {
 
   pub fn process(&mut self, buffer: &mut [f32], length: usize, levels: &mut [f32]) {
     // log!("process {}", length);
-    let dry_level = self.dry_wet;
-    let wet_level = 1.0 - dry_level;
+    let wet_level = self.dry_wet;
+    let dry_level = 1.0 - wet_level;
+
+    let new_input_level_gain = buffer.iter().max_by(|x, y| x.abs().total_cmp(&y.abs())).expect("buffer should not be empty");
+    let reduced_level = MIN_DECIBEL.max(self.input_level + self.level_reduction_per_sample * buffer.len() as f32);
+    self.input_level = gain_to_decibel(*new_input_level_gain, MIN_DECIBEL).max(reduced_level);
+    levels[0] = self.input_level;
 
     // log!("input sum: {}", buffer.iter().sum::<f32>());
-
-    levels.fill(0.0f32);
 
     let mut processed = 0;
 
@@ -387,10 +391,15 @@ impl WasmProcessor {
     for (i, elem) in buffer.iter_mut().enumerate() {
       let tmp = (*elem * dry_level) + self.wet_buffer[i] * wet_level;
       // log!("tmp: {}", tmp);
-      *elem = (-1.0f32).max(1.0f32.min(tmp * output_gain));
+      *elem = (-2.0f32).max(2.0f32.min(tmp * output_gain));
     }
 
     // log!("output sum: {}", buffer.iter().sum::<f32>());
+
+    let new_output_level_gain = buffer.iter().max_by(|x, y| x.abs().total_cmp(&y.abs())).expect("buffer should not be empty");
+    let reduced_level = MIN_DECIBEL.max(self.output_level + self.level_reduction_per_sample * buffer.len() as f32);
+    self.output_level = gain_to_decibel(*new_output_level_gain, MIN_DECIBEL).max(reduced_level);
+    levels[1] = self.output_level;
 
   }
 

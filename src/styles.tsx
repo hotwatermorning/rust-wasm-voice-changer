@@ -44,7 +44,16 @@ export const AppContent = styled("div")`
 
 export const SliderWithName = styled("div")`
   padding: 20px;
-`
+`;
+
 export const SliderBody = styled("input")`
   width: 200px;
-`
+`;
+
+export const AudioPanelLayout = styled("div")`
+  display: flex;
+  gap: 20px;
+`;
+
+export const ParameterListLayout = styled("div")`
+`;

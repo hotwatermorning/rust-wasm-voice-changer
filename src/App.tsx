@@ -27,7 +27,7 @@ const SliderWithName: React.FC<SliderWithNameProp> = (props: SliderWithNameProp)
 
 const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number) => void }> = (props) => {
   return (
-    <>
+    <S.ParameterListLayout>
       <SliderWithName
         name={"Dry Wet"}
         parameterId={"dry-wet"}
@@ -70,7 +70,7 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
         max={30}
         step={1}
       />
-    </>
+    </S.ParameterListLayout>
   );
 }
 
@@ -79,6 +79,7 @@ function AudioControl() {
   const [deviceList, setDeviceList] = useState<A.DeviceList | undefined>(undefined);
   const [inputDevice, setInputDevice] = useState<string>("");
   const [running, setRunning] = useState<boolean>(false);
+  const [levels, setLevels] = useState<A.LevelMeterState>({inputLevel: 0, outputLevel: 0});
 
   useEffect(() => {
     (async () => {
@@ -103,6 +104,7 @@ function AudioControl() {
   }
 
   const callback = (levels: A.LevelMeterState) => {
+    setLevels(levels);
   };
 
   const onStartListening = async () => {
@@ -145,7 +147,11 @@ function AudioControl() {
       >
         {running ? "Pause" : "Resume"}
       </button>
-      <Control onChangeParameter={changeParameter} />
+      <S.AudioPanelLayout>
+        <LevelMeter level={levels.inputLevel} maxDecibel={6} minDecibel={-48} />
+        <Control onChangeParameter={changeParameter} />
+        <LevelMeter level={levels.outputLevel} maxDecibel={6} minDecibel={-48} />
+      </S.AudioPanelLayout>
     </div>
   );
 }
