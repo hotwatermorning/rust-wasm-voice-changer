@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{FftPlanner, Fft, num_complex::Complex};
 
 mod utils;
 
@@ -31,79 +31,186 @@ const LEVEL_REDUCTION_PER_SAMPLE: f32 = 1.0 / 24000.0;
 const MIN_DECIBEL: f32 = -48.0;
 static mut MIN_DECIBEL_GAIN: f32 = 0.0;
 
-#[derive(Debug)]
-struct DelayLine
+struct RingBuffer<T>
 {
-  length: usize,
-  pos: usize,
-  array: Vec<f32>,
-  wet_amount: f32,
-  feedback_amount: f32,
-}
+  buffer: Vec<T>;
+  capacity: usize;
+  read_pos: usize;
+  write_pos: usize;
+};
 
-impl DelayLine
-{
-  pub fn new(length: usize, wet_amount: f32, feedback_amount: f32) -> DelayLine
-  {
-    DelayLine {
-      length,
-      pos: 0,
-      array: vec![0.0; length],
-      wet_amount,
-      feedback_amount
+impl RingBuffer<T> {
+  pub fn new(capacity: usize) {
+    RingBuffer {
+      buffer: Vec::new::<T>(0; capacity + 1),
+      capacity: capacity,
+      read_pos: 0,
+      write_pos: 0,
     }
   }
 
-  pub fn process(&mut self, sample: f32) -> f32
-  {
-//   let before = sample;
-
-    let dry_amount = 1.0 - self.wet_amount;
-    let p = &mut self.array[self.pos];
-
-    let wet_sample = sample + *p * self.feedback_amount;
-    *p = wet_sample;
-    self.pos = (self.pos + 1) % self.length;
-
-    (sample * dry_amount) + (wet_sample * self.wet_amount)
-//     log!("pos: {}, before: {}, after: {}", self.pos, before, x);
+  pub fn num_readable(&self) {
+    self.read_pos <=self.write_pos
+    ? self.write_pos - self.read_pos
+    : self.write_pos + (self.capacity + 1) - read_pos
   }
 
-  pub fn dump(&self) -> String {
-    format!("{:?}", self)
+  pub fn num_writable(&self) {
+    self.capacity - num_readable()
+  }
+
+  pub fn read(&mut self, dest: &mut [f32], length: usize) -> boolean {
+    if self.num_readable() < length {
+      return false;
+    }
+
+    let buffer_length = self.capacity + 1;
+    let copy1 = std::cmp::min(buffer_length - self.read_pos, length);
+
+
+    dest[0..copy1].clone_from_slice(self.buffer[self.read_pos..self.read_pos + copy1]);
+
+    if copy1 == length {
+      return true;
+    }
+
+    let copy2 = std::cmp::max(length, copy1) - copy1;
+    dest[copy1..copy1+copy2].clone_from_slice(self.buffer[0..copy2]);
+
+    true
+  }
+
+  pub fn write(&mut self, src: &[f32], length: usize) -> boolean {
+    if self.num_readable() < length {
+      return false;
+    }
+
+    let buffer_length = self.capacity + 1;
+    let copy1 = std::cmp::min(buffer_length - self.write_pos, length);
+
+    if copy1 == length {
+      self.buffer[self.write_pos..self.write_pos + copy1].clone_from_slice(src[0..copy1]);
+      self.write_pos += copy1;
+      return true;
+    }
+
+    let copy2 = length - copy1;
+    self.buffer[0..copy2].clone_from_slice(src[copy1..copy1 + copy2]);
+    self.write_pos = copy2;
+    true
+  }
+
+  pub fn overlap_add(&mut self, src: &[f32], length: usize, overlap_size: usize) -> boolean {
+    if length < overlap_size {
+      return false;
+    }
+
+    if self.num_readable() < overlap_size {
+      return false;
+    }
+
+    let num_to_write_new = length - overlap_size;
+    if self.num_writable() < num_to_write_new {
+      return false;
+    }
+
+    let buffer_length = self.capacity + 1;
+
+    let write_start =
+    (self.write_pos >= overlap_size)
+    ?   self.write_pos - overlap_size
+    :   (buffer_length - (overlap_size - self.write_pos));
+
+    let copy1 = std::cmp::min(buffer_length - write_start, overlap_size);
+
+    self.buffer[write_start..write_start + copy1].clone_from_slice(src[0..copy1]);
+
+    if copy1 != overlap_size {
+      let copy2 = overlap_size - copy1;
+      self.buffer[0..copy2].clone_from_slice(src[copy1..copy1 + copy2]);
+    }
+
+    write(src[overlap_size..length], num_to_write_new)
+  }
+
+  pub fn fill(&mut self, length: usize, value: T) -> boolean {
+    if self.num_writable() < length {
+      return false;
+    }
+
+    let buffer_length = self.capacity + 1;
+    let copy1 = std::cmp::min(buffer_length - self.write_pos, length);
+
+    self.buffer[self.write_pos, self.write_pos + copy1].fill(value);
+
+    if copy1 == length {
+      self.write_pos += copy1;
+      return true;
+    }
+
+    let copy2 = buffer_length - copy1;
+    self.buffer[0..copy2].fill(value);
+    self.write_pos = copy2;
+
+    true
   }
 }
 
 #[wasm_bindgen]
 pub struct WasmProcessor {
   sample_rate: usize,
-  phase: f32,
-  delay: DelayLine,
+  fft_planner: FftPlanner,
+  fft: Arc<dyn Fft<T>>,
+  ifft: Arg<dyn Fft<T>>,
+  fft_size: usize,
+  overlap_size: usize,
+  input_ring_buffer: RingBuffer<f32>,
+  output_ring_buffer: RingBuffer<f32>,
+  signal_buffer: Vec<Complex>,
+  frequency_buffer: Vec<Complex>,
+  cepstrum_buffer: Vec<Complex>,
+  tmp_fft_buffer: Vec<Complex>,
+  tmp_fft_buffer2: Vec<Complex>,
+  tmp_phase_buffer: Vec<f32>,
+  window: Vec<f32>,
+  prev_input_phases: Vec<f32>,
+  prev_output_phases: Vec<f32>,
+  analysis_magnitude: Vec<f32>,
+  analysis_frequencies: Vec<f32>,
+  synthesis_magnitude: Vec<f32>,
+  synthesis_frequencies: Vec<f32>,
+  dry_wet: f32,
+  formant: f32,
+  pitch: f32,
+  output_gain: f32,
+  envelope_order,
   input_level: f32,
   output_level: f32,
+  tmp_buffer: Vec<f32>,
+  wet_buffer: Vec<f32>,
 }
 
 #[wasm_bindgen]
 impl WasmProcessor {
-  pub fn new(
-    sample_rate: usize,
-    block_size: usize,
-    initial_delay_length: f32,
-    initial_wet_amount: f32,
-    initial_feedback_amount: f32
-  ) -> WasmProcessor {
+  pub fn new(sample_rate: usize) -> WasmProcessor {
     utils::set_panic_hook();
 
     unsafe { MIN_DECIBEL_GAIN = decibel_to_gain(MIN_DECIBEL); };
 
-    let len = unsafe { (initial_delay_length * sample_rate as f32).to_int_unchecked::<usize>() };
-    log!("initial-delay-length {}", initial_delay_length);
-    log!("len {}", len);
+    let fft_size = 4096;
+    let overlap_size = 2048;
 
+    let fft_planner = FftPlanner::new();
+    let fft = fft_planner.plan_fft_forward(fft_size);
+    let ifft = fft_planner.plan_fft_backward(fft_size);
     let d = WasmProcessor {
       sample_rate,
-      phase: 0.0,
-      delay: DelayLine::new(len, initial_wet_amount, initial_feedback_amount),
+      fft_planner,
+      fft,
+      ifft,
+      fft_size,
+      overlap_size,
+      input_ring_buffer: RingBuffer<f32>::new(fft_size +
       input_level: MIN_DECIBEL,
       output_level: MIN_DECIBEL,
     };
