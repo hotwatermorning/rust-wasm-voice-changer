@@ -41,3 +41,10 @@ export const AppLogoSpin = keyframes`
 
 export const AppContent = styled("div")`
 `;
+
+export const SliderWithName = styled("div")`
+  padding: 20px;
+`
+export const SliderBody = styled("input")`
+  width: 200px;
+`

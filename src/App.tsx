@@ -9,16 +9,19 @@ type SliderWithNameProp = {
   parameterId: string;
   onChangeParameter: (parameterId: string, value: number) => void;
   defaultValue: number;
+  min: number;
+  max: number;
+  step?: "any" | number;
 };
 
 const SliderWithName: React.FC<SliderWithNameProp> = (props: SliderWithNameProp) => {
   return (
-    <div className="slider-with-name">
+    <S.SliderWithName>
       <div className="slider-name">{props.name}</div>
-      <input className="slider-body" type="range" defaultValue={props.defaultValue} min={0} max={1} step={"any"}
+      <S.SliderBody type="range" defaultValue={props.defaultValue} min={props.min} max={props.max} step={props.step || "any"}
   onChange={(event) => props.onChangeParameter(props.parameterId, parseFloat(event.target.value))}>
-      </input>
-    </div>
+      </S.SliderBody>
+    </S.SliderWithName>
   );
 }
 
@@ -26,22 +29,46 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
   return (
     <>
       <SliderWithName
-        name={"Wet Amount"}
-        parameterId={"wet-amount"}
+        name={"Dry Wet"}
+        parameterId={"dry-wet"}
         onChangeParameter={props.onChangeParameter}
         defaultValue={0.5}
+        min={0.0}
+        max={1.0}
       />
       <SliderWithName
-        name={"Feedback"}
-        parameterId={"feedback-amount"}
+        name={"Output Gain"}
+        parameterId={"output-gain"}
         onChangeParameter={props.onChangeParameter}
-        defaultValue={0.5}
+        defaultValue={0}
+        min={-48}
+        max={6}
       />
       <SliderWithName
-        name={"Delay Length"}
-        parameterId={"delay-length"}
+        name={"Pitch Shift"}
+        parameterId={"pitch-shift"}
         onChangeParameter={props.onChangeParameter}
-        defaultValue={0.2}
+        defaultValue={0}
+        min={-1200}
+        max={1200}
+        step={1}
+      />
+      <SliderWithName
+        name={"Formant Shift"}
+        parameterId={"pitch-shift"}
+        onChangeParameter={props.onChangeParameter}
+        defaultValue={0}
+        min={-1}
+        max={1}
+      />
+       <SliderWithName
+        name={"Envelope Order"}
+        parameterId={"envelope-order"}
+        onChangeParameter={props.onChangeParameter}
+        defaultValue={7}
+        min={3}
+        max={30}
+        step={1}
       />
     </>
   );
