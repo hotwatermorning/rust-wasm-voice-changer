@@ -53,6 +53,11 @@ export const SliderBody = styled("input")`
 export const AudioPanelLayout = styled("div")`
   display: flex;
   gap: 20px;
+  margin: 0 auto;
+  justify-content: space-around;
+`;
+
+export const MainPanelLayout = styled("div")`
 `;
 
 export const ParameterListLayout = styled("div")`

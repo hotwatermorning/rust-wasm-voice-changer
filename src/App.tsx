@@ -74,7 +74,7 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
   );
 }
 
-function AudioControl() {
+function MainPanel() {
   const [audioManager, setAudioManager] = useState<A.AudioManager|undefined>(undefined);
   const [deviceList, setDeviceList] = useState<A.DeviceList | undefined>(undefined);
   const [inputDevice, setInputDevice] = useState<string>("");
@@ -132,7 +132,7 @@ function AudioControl() {
   // Audio already initialized. Suspend / resume based on its current state.
   const { context } = audioManager;
   return (
-    <div>
+    <S.MainPanelLayout>
       <button
         onClick={async () => {
           if (running) {
@@ -152,7 +152,7 @@ function AudioControl() {
         <Control onChangeParameter={changeParameter} />
         <LevelMeter level={levels.outputLevel} maxDecibel={6} minDecibel={-48} />
       </S.AudioPanelLayout>
-    </div>
+    </S.MainPanelLayout>
   );
 }
 
@@ -163,7 +163,7 @@ function App() {
         Wasm Audio Voice Changer
       </S.AppHeader>
       <S.AppContent>
-        <AudioControl />
+        <MainPanel />
       </S.AppContent>
     </S.App>
   );
