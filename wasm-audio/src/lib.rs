@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 use rustfft::{FftPlanner, Fft, num_complex::Complex};
+use std::convert::{TryFrom, TryInto};
 
 mod utils;
 
@@ -16,7 +17,7 @@ macro_rules! log {
 
 fn decibel_to_gain(decibel: f32) -> f32
 {
-  (10.0 as f32).powf(decibel / 20.0)
+  (10.0f32).powf(decibel / 20.0)
 }
 
 fn gain_to_decibel(gain: f32, min_decibel: f32) -> f32
@@ -33,25 +34,29 @@ const LEVEL_REDUCTION_PER_SAMPLE: f32 = 1.0 / 24000.0;
 const MIN_DECIBEL: f32 = -48.0;
 static mut MIN_DECIBEL_GAIN: f32 = 0.0;
 
-struct RingBuffer<T>
+struct RingBuffer<T: Clone>
 {
-  buffer: Vec<T>;
-  capacity: usize;
-  read_pos: usize;
-  write_pos: usize;
-};
+  buffer: Vec<T>,
+  capacity: usize,
+  read_pos: usize,
+  write_pos: usize,
+}
 
-impl RingBuffer<T> {
-  pub fn new(capacity: usize) {
+impl<T: Clone> RingBuffer<T> {
+  pub fn new(capacity: usize, value: T) -> RingBuffer<T> {
     RingBuffer {
-      buffer: Vec::new::<T>(0; capacity + 1),
-      capacity: capacity,
+      buffer: vec![value; capacity + 1],
+      capacity,
       read_pos: 0,
       write_pos: 0,
     }
   }
 
-  pub fn num_readable(&self) {
+  pub fn capacity(&self) -> usize {
+    self.capacity
+  }
+
+  pub fn num_readable(&self) -> usize {
     if self.read_pos <=self.write_pos {
       self.write_pos - self.read_pos
     } else {
@@ -59,11 +64,21 @@ impl RingBuffer<T> {
     }
   }
 
-  pub fn num_writable(&self) {
+  pub fn num_writable(&self) -> usize {
     self.capacity - self.num_readable()
   }
 
-  pub fn read(&mut self, dest: &mut [f32], length: usize) -> bool {
+  pub fn is_full(&self) -> bool {
+    self.num_writable() == 0
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.num_readable() == 0
+  }
+
+  pub fn read(&mut self, dest: &mut [T]) -> bool {
+    let length = dest.len();
+
     if self.num_readable() < length {
       return false;
     }
@@ -84,16 +99,19 @@ impl RingBuffer<T> {
     true
   }
 
-  pub fn write(&mut self, src: &[f32], length: usize) -> bool {
-    if self.num_readable() < length {
+  pub fn write(&mut self, src: &[T]) -> bool {
+    let length = src.len();
+
+    if self.num_writable() < length {
       return false;
     }
 
     let buffer_length = self.capacity + 1;
     let copy1 = std::cmp::min(buffer_length - self.write_pos, length);
 
+    self.buffer[self.write_pos..self.write_pos + copy1].clone_from_slice(&src[0..copy1]);
+    
     if copy1 == length {
-      self.buffer[self.write_pos..self.write_pos + copy1].clone_from_slice(&src[0..copy1]);
       self.write_pos += copy1;
       return true;
     }
@@ -104,7 +122,9 @@ impl RingBuffer<T> {
     true
   }
 
-  pub fn overlap_add(&mut self, src: &[f32], length: usize, overlap_size: usize) -> boolean {
+  pub fn overlap_add(&mut self, src: &[T], overlap_size: usize) -> bool {
+    let length = src.len();
+
     if length < overlap_size {
       return false;
     }
@@ -136,7 +156,7 @@ impl RingBuffer<T> {
       self.buffer[0..copy2].clone_from_slice(&src[copy1..copy1 + copy2]);
     }
 
-    self.write(&src[overlap_size..length], num_to_write_new)
+    self.write(&src[overlap_size..length])
   }
 
   pub fn fill(&mut self, length: usize, value: T) -> bool {
@@ -147,7 +167,7 @@ impl RingBuffer<T> {
     let buffer_length = self.capacity + 1;
     let copy1 = std::cmp::min(buffer_length - self.write_pos, length);
 
-    self.buffer[self.write_pos..self.write_pos + copy1].fill(value);
+    self.buffer[self.write_pos..self.write_pos + copy1].fill(value.clone());
 
     if copy1 == length {
       self.write_pos += copy1;
@@ -215,11 +235,11 @@ pub struct WasmProcessor {
   dry_wet: f32,
   formant: f32,
   pitch: f32,
-  output_gain: f32,
+  output_gain_decibel: f32,
   envelope_order: usize,
   input_level: f32,
   output_level: f32,
-};
+}
 
 #[wasm_bindgen]
 impl WasmProcessor {
@@ -228,43 +248,48 @@ impl WasmProcessor {
 
     unsafe { MIN_DECIBEL_GAIN = decibel_to_gain(MIN_DECIBEL); };
 
-    let fft_size = 4096;
-    let overlap_size = 2048;
+    let fft_size = 2048;
+    let overlap_size = 512;
 
-    let fft_planner = FftPlanner::new();
+    let mut fft_planner = FftPlanner::new();
     let fft = fft_planner.plan_fft_forward(fft_size);
-    let ifft = fft_planner.plan_fft_backward(fft_size);
+    let ifft = fft_planner.plan_fft_inverse(fft_size);
 
-    let signal_buffer = vec![Cmp::new(0, 0), fft_size];
-    let frequency_buffer = vec![Cmp::new(0, 0), fft_size];
-    let cepstrum_buffer = vec![Cmp::new(0, 0), fft_size];
+    let orig = Cmp::new(0.0, 0.0);
 
-    let window = vec![0.0f32, fft_size];
+    let signal_buffer = vec![orig; fft_size];
+    let frequency_buffer = vec![orig; fft_size];
+    let cepstrum_buffer = vec![orig; fft_size];
+
+    let mut window = vec![0.0f32; fft_size];
     for (i, elem) in window.iter_mut().enumerate() {
-      let omega: f32 = 2.0f32 * std::f32::consts::PI * i / fft_size;
-      elem = 0.5f32 * (1.0f32 - omega.cos());
+      let omega: f32 = 2.0f32 * std::f32::consts::PI * i as f32 / fft_size as f32;
+      *elem = 0.5f32 * (1.0f32 - omega.cos());
     }
 
-    let input_ring_buffer = RingBuffer::<f32>::new(fft_size);
+    let mut input_ring_buffer = RingBuffer::<f32>::new(fft_size, 0.0f32);
     input_ring_buffer.discard_all();
-    input_ring_buffer.fill(fft_size - overlap_size);
+    input_ring_buffer.fill(fft_size - overlap_size, 0.0f32);
+    log!("input ring buffer: readable size {}", input_ring_buffer.num_readable());
 
-    let output_ring_buffer = RingBuffer::<f32>::new(fft_size + block_size);
+    let mut output_ring_buffer = RingBuffer::<f32>::new(fft_size + 2 * block_size, 0.0f32);
     output_ring_buffer.discard_all();
-    output_ring_buffer.fill(fft_size + block_size - overlap_size);
+    output_ring_buffer.fill(fft_size + block_size - overlap_size, 0.0f32);
+    log!("output ring buffer: capacity {}", output_ring_buffer.capacity());
+    log!("output ring buffer: readable size {}", output_ring_buffer.num_readable());
 
-    let tmp_buffer = vec![0.0f32, fft_size];
-    let wet_buffer = vec![0.0f32, block_size];
+    let tmp_buffer = vec![0.0f32; fft_size];
+    let wet_buffer = vec![0.0f32; block_size];
 
-    let tmp_fft_buffer = vec![Cmp::new(0, 0), fft_size];
-    let tmp_fft_buffer2 = vec![Cmp::new(0, 0), fft_size];
-    let tmp_phase_buffer = vec![Cmp::new(0, 0), fft_size];
-    let prev_input_phases = vec![Cmp::new(0, 0), fft_size];
-    let prev_output_phases = vec![Cmp::new(0, 0), fft_size];
-    let analysis_magnitude = vec![Cmp::new(0, 0), fft_size];
-    let analysis_frequencies = vec![Cmp::new(0, 0), fft_size];
-    let synthesis_magnitude = vec![Cmp::new(0, 0), fft_size];
-    let synthesis_frequencies = vec![Cmp::new(0, 0), fft_size];
+    let tmp_fft_buffer = vec![orig; fft_size];
+    let tmp_fft_buffer2 = vec![orig; fft_size];
+    let tmp_phase_buffer = vec![0.0f32; fft_size];
+    let prev_input_phases = vec![0.0f32; fft_size];
+    let prev_output_phases = vec![0.0f32; fft_size];
+    let analysis_magnitude = vec![0.0f32; fft_size];
+    let analysis_frequencies = vec![0.0f32; fft_size];
+    let synthesis_magnitude = vec![0.0f32; fft_size];
+    let synthesis_frequencies = vec![0.0f32; fft_size];
 
     let d = WasmProcessor {
       sample_rate,
@@ -290,57 +315,127 @@ impl WasmProcessor {
       synthesis_frequencies,
       tmp_buffer,
       wet_buffer,
-      dry_wet: 0.5,
+      dry_wet: 0.8,
       formant: 0.5,
       pitch: 0.5,
-      output_gain: 0.0,
+      output_gain_decibel: 0.0,
+      envelope_order: 5,
       input_level: MIN_DECIBEL,
       output_level: MIN_DECIBEL,
     };
 
-//     log!("{}", d.delay.dump());
     d
   }
 
   pub fn process(&mut self, buffer: &mut [f32], length: usize, levels: &mut [f32]) {
-//    log!("len of levels: {}", levels.len());
+    // log!("process {}", length);
+    let dry_level = self.dry_wet;
+    let wet_level = 1.0 - dry_level;
 
-    let omega = 440.0 * 2.0 * std::f32::consts::PI / self.sample_rate as f32;
+    // log!("input sum: {}", buffer.iter().sum::<f32>());
 
-//    let before = buffer[0];
-    let new_input_level_gain = buffer.iter().max_by(|x, y| x.abs().total_cmp(&y.abs())).expect("buffer should not be empty");
-    let reduced_level = MIN_DECIBEL.max(self.input_level - LEVEL_REDUCTION_PER_SAMPLE * buffer.len() as f32);
-    levels[0] = gain_to_decibel(*new_input_level_gain, MIN_DECIBEL).max(reduced_level);
+    levels.fill(0.0f32);
 
-    for x in buffer[..length].iter_mut() {
-      *x = self.delay.process(*x);
-      self.phase += omega;
-      if self.phase >= 2.0 * std::f32::consts::PI {
-        self.phase -= 2.0 * std::f32::consts::PI;
+    let mut processed = 0;
+
+    loop {
+      if processed == length { 
+        break;
       }
+
+      let num_writable = self.input_ring_buffer.num_writable();
+      if num_writable == 0 {
+        // log!("[ERROR] unexpected writable size");
+      }
+
+      let num_to_write = std::cmp::min(num_writable, length - processed);
+      // log!("num_to_write: {}", &num_to_write);
+
+      let write_result = self.input_ring_buffer.write(&buffer[processed..processed + num_to_write]); 
+      if !write_result {
+        // log!("[ERROR] failed to write into input ring buffer");
+      }
+
+      // log!("input ring buffer before {}", &self.input_ring_buffer.num_readable());
+      if self.input_ring_buffer.is_full() {
+        self.process_fft_block();
+      }
+      // log!("input ring buffer after {}", &self.input_ring_buffer.num_readable());
+
+      // log!("read output ring buffer {}", &num_to_write);
+      let read_result = self.output_ring_buffer.read(&mut self.wet_buffer[processed..processed + num_to_write]);
+
+      if !read_result {
+        // log!("[ERROR] failed to read from output ring buffer {}", self.output_ring_buffer.num_readable());
+      }
+
+      let discard_result = self.output_ring_buffer.discard(num_to_write);
+      if !discard_result {
+        // log!("[ERROR] failed to discard output ring buffer {}", self.output_ring_buffer.num_readable());
+      }
+
+      processed += num_to_write;
+
+      // log!("output ring buffer readable size at loop end {}", self.output_ring_buffer.num_readable());
     }
 
-    let new_output_level_gain = buffer.iter().max_by(|x, y| x.abs().total_cmp(&y.abs())).expect("buffer should not be empty");
-    let reduced_level = MIN_DECIBEL.max(self.output_level - LEVEL_REDUCTION_PER_SAMPLE * buffer.len() as f32);
-    levels[1] = gain_to_decibel(*new_output_level_gain, MIN_DECIBEL).max(reduced_level);
-//    let after = buffer[0];
+    // log!("wet sum: {}", self.wet_buffer.iter().sum::<f32>());
 
-//     log!("before {}, after {}", before, after);
+    let output_gain = decibel_to_gain(self.output_gain_decibel);
+    // log!("dry: {}, wet: {}, gain: {}", dry_level, wet_level, output_gain);
+
+    for (i, elem) in buffer.iter_mut().enumerate() {
+      let tmp = (*elem * dry_level) + self.wet_buffer[i] * wet_level;
+      // log!("tmp: {}", tmp);
+      *elem = (-1.0f32).max(1.0f32.min(tmp * output_gain));
+    }
+
+    // log!("output sum: {}", buffer.iter().sum::<f32>());
+
   }
 
-  pub fn set_wet_amount(&mut self, value: f32) {
-    self.delay.wet_amount = value;
+  fn process_fft_block(&mut self) {
+    let read_result = self.input_ring_buffer.read(&mut self.tmp_buffer);
+    if !read_result {
+      // log!("[ERROR] failed to read from input ring buffer.");
+    }
+    let discard_result = self.input_ring_buffer.discard(self.fft_size);
+    if !discard_result {
+      // log!("[ERROR] failed to discard input ring buffer.");
+    }
+
+    // log!("write output ring buffer: {}", &self.tmp_buffer.len());
+    // log!("output ring buffer writable size {}", self.output_ring_buffer.num_writable());
+    let write_result = self.output_ring_buffer.write(&self.tmp_buffer);
+    if !write_result {
+      // log!("[ERROR] failed to write into output ring buffer.");
+    }
+
+    // log!("output ring buffer readable size: {}", &self.output_ring_buffer.num_readable());
   }
 
-  pub fn set_feedback_amount(&mut self, value: f32) {
-    log!("wet-amount: {}, feedback: {}, length: {}", self.delay.wet_amount, self.delay.feedback_amount, self.delay.length);
-
-    self.delay.feedback_amount = std::cmp::min(value, 0.95);
+  fn wrap_phase(phase_in: f32) -> f32 {
+    let pi = std::f32::consts::PI;
+    if phase_in >= 0.0f32 {
+      (phase_in + pi) % (2.0f32 * pi) - pi
+    } else {
+      (phase_in - pi) % (-2.0f32 * pi) + pi
+    }
   }
 
-  pub fn set_delay_length(&mut self, value: f32) {
-    let mut len = unsafe { (value * self.sample_rate as f32).to_int_unchecked::<usize>() };
-    len = std::cmp::max(len, 10);
-    self.delay = DelayLine::new(len, self.delay.wet_amount, self.delay.feedback_amount);
-  }
+  // pub fn set_wet_amount(&mut self, value: f32) {
+  //   self.delay.wet_amount = value;
+  // }
+
+  // pub fn set_feedback_amount(&mut self, value: f32) {
+  //   log!("wet-amount: {}, feedback: {}, length: {}", self.delay.wet_amount, self.delay.feedback_amount, self.delay.length);
+
+  //   self.delay.feedback_amount = std::cmp::min(value, 0.95);
+  // }
+
+  // pub fn set_delay_length(&mut self, value: f32) {
+  //   let mut len = unsafe { (value * self.sample_rate as f32).to_int_unchecked::<usize>() };
+  //   len = std::cmp::max(len, 10);
+  //   self.delay = DelayLine::new(len, self.delay.wet_amount, self.delay.feedback_amount);
+  // }
 }

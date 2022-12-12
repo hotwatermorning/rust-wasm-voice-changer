@@ -32,19 +32,13 @@ class Processor extends AudioWorkletProcessor {
         this.port.postMessage({ type: 'wasm-module-loaded' });
       });
     } else if (event.type === 'init-processor') {
-      const { sampleRate, blockSize, delayLength, wetAmount, feedback } = event;
+      const { sampleRate, blockSize } = event;
 
       // Store this because we use it later to process when we have enough recorded
       // audio samples for our first analysis.
       this.blockSize = blockSize;
 
-      this.processor = WasmProcessor.new(
-        sampleRate,
-        blockSize,
-        delayLength,
-        wetAmount,
-        feedback
-      );
+      this.processor = WasmProcessor.new(sampleRate, blockSize);
 
       // Holds a buffer of audio sample values that we'll send to the Wasm module
       // for analysis at regular intervals.
@@ -54,16 +48,15 @@ class Processor extends AudioWorkletProcessor {
       this.numOutputBufferSamples = this.outputBuffer.length;
       this.levels = new Float32Array(2).fill(0);
     } else if(event.type === "set-wet-amount") {
-      this.processor.set_wet_amount(event.value);
+      // this.processor.set_wet_amount(event.value);
     } else if(event.type === "set-feedback-amount") {
-      this.processor.set_feedback_amount(event.value);
+      // this.processor.set_feedback_amount(event.value);
     } else if(event.type === "set-delay-length") {
-      this.processor.set_delay_length(event.value);
+      // this.processor.set_delay_length(event.value);
     }
   }
 
   process(inputs, outputs) {
-
     // inputs contains incoming audio samples for further processing. outputs
     // contains the audio samples resulting from any processing performed by us.
 
@@ -71,6 +64,10 @@ class Processor extends AudioWorkletProcessor {
     // that records "in stereo" would provide two channels. For this simple app,
     // we use assume either "mono" input or the "left" channel if microphone is
     // stereo.
+
+    if(!this.processor) {
+      return true;
+    }
 
     const inputChannels = inputs[0];
     const outputChannels = outputs[0];
@@ -90,8 +87,10 @@ class Processor extends AudioWorkletProcessor {
 
     this.port.postMessage({
       type: "update-levels",
-      inputLevel: this.levels[0],
-      outputLevel: this.levels[1],
+      data: {
+        inputLevel: this.levels[0],
+        outputLevel: this.levels[1],
+      }
     });
 
     for (let i = 0; i < len; ++i) {
