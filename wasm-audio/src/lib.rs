@@ -33,7 +33,12 @@ fn gain_to_decibel(gain: f32, min_decibel: f32) -> f32
 const MIN_DECIBEL: f32 = -48.0;
 static mut MIN_DECIBEL_GAIN: f32 = 0.0;
 
-struct RingBuffer<T: Clone>
+trait OverlappedAddable<T>
+{
+  fn overlap_add(&mut self, src: &[T], overlap_size: usize) -> bool;
+}
+
+struct RingBuffer<T: Clone + Copy>
 {
   buffer: Vec<T>,
   capacity: usize,
@@ -41,7 +46,7 @@ struct RingBuffer<T: Clone>
   write_pos: usize,
 }
 
-impl<T: Clone> RingBuffer<T> {
+impl<T: Clone + Copy> RingBuffer<T> {
   pub fn new(capacity: usize, value: T) -> RingBuffer<T> {
     RingBuffer {
       buffer: vec![value; capacity + 1],
@@ -121,43 +126,6 @@ impl<T: Clone> RingBuffer<T> {
     true
   }
 
-  pub fn overlap_add(&mut self, src: &[T], overlap_size: usize) -> bool {
-    let length = src.len();
-
-    if length < overlap_size {
-      return false;
-    }
-
-    if self.num_readable() < overlap_size {
-      return false;
-    }
-
-    let num_to_write_new = length - overlap_size;
-    if self.num_writable() < num_to_write_new {
-      return false;
-    }
-
-    let buffer_length = self.capacity + 1;
-
-    let write_start =
-    if self.write_pos >= overlap_size {
-      self.write_pos - overlap_size
-    } else {
-      buffer_length - (overlap_size - self.write_pos)
-    };
-
-    let copy1 = std::cmp::min(buffer_length - write_start, overlap_size);
-
-    self.buffer[write_start..write_start + copy1].clone_from_slice(&src[0..copy1]);
-
-    if copy1 != overlap_size {
-      let copy2 = overlap_size - copy1;
-      self.buffer[0..copy2].clone_from_slice(&src[copy1..copy1 + copy2]);
-    }
-
-    self.write(&src[overlap_size..length])
-  }
-
   pub fn fill(&mut self, length: usize, value: T) -> bool {
     if self.num_writable() < length {
       return false;
@@ -204,7 +172,72 @@ impl<T: Clone> RingBuffer<T> {
   }
 }
 
+impl<T> OverlappedAddable<T> for RingBuffer<T>
+  where T: std::ops::AddAssign + Clone + Copy
+{
+  fn overlap_add(&mut self, src: &[T], overlap_size: usize) -> bool {
+    let length = src.len();
+
+    if length < overlap_size {
+      return false;
+    }
+
+    if self.num_readable() < overlap_size {
+      return false;
+    }
+
+    let num_to_write_new = length - overlap_size;
+    if self.num_writable() < num_to_write_new {
+      return false;
+    }
+
+    let buffer_length = self.capacity + 1;
+
+    let write_start =
+    if self.write_pos >= overlap_size {
+      self.write_pos - overlap_size
+    } else {
+      buffer_length - (overlap_size - self.write_pos)
+    };
+
+    let copy1 = std::cmp::min(buffer_length - write_start, overlap_size);
+
+    for i in 0..copy1 {
+      self.buffer[write_start + i] += src[i];
+    }
+
+    if copy1 != overlap_size {
+      let copy2 = overlap_size - copy1;
+      for i in 0..copy2 {
+        self.buffer[i] += src[copy1 + i];
+      }
+    }
+
+    self.write(&src[overlap_size..length])
+  }
+}
+
 type Cmp = Complex<f32>;
+
+fn scale_cmp(arr: &mut [Cmp]) {
+  if arr.len() == 0 {
+    return;
+  }
+
+  // let scale = (1.0 / arr.len() as f32);
+  let scale = arr.len() as f32;
+  for x in arr.iter_mut() {
+    *x = Cmp::new(x.re() / scale, x.im() / scale)
+  }
+}
+
+fn verify_buffer_f32(buf: &[f32]) -> bool {
+  buf.iter().find(|x| x.is_nan()).is_none()
+}
+
+fn verify_buffer_cmp(buf: &[Cmp]) -> bool {
+  buf.iter().find(|x| x.re().is_nan() || x.im().is_nan()).is_none()
+}
 
 #[wasm_bindgen]
 pub struct WasmProcessor {
@@ -257,9 +290,18 @@ impl WasmProcessor {
 
     unsafe { MIN_DECIBEL_GAIN = decibel_to_gain(MIN_DECIBEL); };
 
-    let fft_size = 2048;
+    let fft_size = 1024;
     let overlap_count = 4;
     let hop_size = fft_size / overlap_count;
+    let overlap_size = fft_size - hop_size;
+
+    log!(
+      "fft_size: {}, overlap_count: {}, hop_size: {}, overlap_size: {}",
+      fft_size,
+      overlap_count,
+      hop_size,
+      overlap_size
+    );
 
     let mut fft_planner = FftPlanner::new();
     let fft = fft_planner.plan_fft_forward(fft_size);
@@ -267,8 +309,8 @@ impl WasmProcessor {
 
     let orig = Cmp::new(0.0, 0.0);
 
-    let fft_scratch_buffer = vec![orig; fft.get_outofplace_scratch_len()];
-    let ifft_scratch_buffer = vec![orig; ifft.get_outofplace_scratch_len()];
+    let fft_scratch_buffer = vec![orig; fft.get_inplace_scratch_len()];
+    let ifft_scratch_buffer = vec![orig; ifft.get_inplace_scratch_len()];
 
     let signal_buffer = vec![orig; fft_size];
     let frequency_buffer = vec![orig; fft_size];
@@ -276,18 +318,18 @@ impl WasmProcessor {
 
     let mut window = vec![0.0f32; fft_size];
     for (i, elem) in window.iter_mut().enumerate() {
-      let omega: f32 = 2.0f32 * std::f32::consts::PI * i as f32 / fft_size as f32;
-      *elem = 0.5f32 * (1.0f32 - omega.cos());
+      let omega: f32 = 2.0f32 * std::f32::consts::PI / fft_size as f32;
+      *elem = 0.5f32 * (1.0f32 - (omega * i as f32).cos());
     }
 
     let mut input_ring_buffer = RingBuffer::<f32>::new(fft_size, 0.0f32);
     input_ring_buffer.discard_all();
-    input_ring_buffer.fill(hop_size, 0.0f32);
+    input_ring_buffer.fill(fft_size - hop_size, 0.0f32);
     log!("input ring buffer: readable size {}", input_ring_buffer.num_readable());
 
-    let mut output_ring_buffer = RingBuffer::<f32>::new(fft_size + 2 * block_size, 0.0f32);
+    let mut output_ring_buffer = RingBuffer::<f32>::new(fft_size + overlap_size + 2 * block_size, 0.0f32);
     output_ring_buffer.discard_all();
-    output_ring_buffer.fill(hop_size + block_size, 0.0f32);
+    output_ring_buffer.fill(fft_size + overlap_size + block_size, 0.0f32);
     log!("output ring buffer: capacity {}", output_ring_buffer.capacity());
     log!("output ring buffer: readable size {}", output_ring_buffer.num_readable());
 
@@ -345,8 +387,8 @@ impl WasmProcessor {
       tmp_buffer,
       wet_buffer,
       dry_wet: 0.8,
-      formant: 0.5,
-      pitch: 0.5,
+      formant: 0.0,
+      pitch: 0.0,
       output_gain_decibel: 0.0,
       envelope_order: 5,
       input_level: MIN_DECIBEL,
@@ -434,70 +476,20 @@ impl WasmProcessor {
 
   fn process_fft_block(&mut self) {
 
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // for (i, elem) in self.tmp_fft_buffer.iter_mut().enumerate() {
-    //   *elem = Cmp::new(i as f32 * 0.2f32, 1.0);
-    // }
-
-    // self.fft.process(&mut self.tmp_fft_buffer);
-
-    // let read_result = self.input_ring_buffer.read(&mut self.tmp_buffer);
-    // if !read_result {
-    //   // log!("[ERROR] failed to read from input ring buffer.");
-    // }
-    // let discard_result = self.input_ring_buffer.discard(self.fft_size);
-    // if !discard_result {
-    //   // log!("[ERROR] failed to discard input ring buffer.");
-    // }
-    // // log!("write output ring buffer: {}", &self.tmp_buffer.len());
-    // // log!("output ring buffer writable size {}", self.output_ring_buffer.num_writable());
-    // let write_result = self.output_ring_buffer.write(&self.tmp_buffer);
-    // if !write_result {
-    //   // log!("[ERROR] failed to write into output ring buffer.");
-    // }
-
     let N = self.fft_size;
-    let formant_expand_amount = 2.0f32.powf(self.formant / 100.0);
-    let pitch_change_amount = 2.0f32.powf(self.pitch / 100.0);
+    let formant_expand_amount = 2.0f32.powf(self.formant);
+    let pitch_change_amount = 2.0f32.powf(self.pitch);
     let envelope_amount = 1.0;
     let fine_structure_amount = 1.0;
 
     let read_result = self.input_ring_buffer.read(&mut self.tmp_buffer);
+    if !read_result {
+      log!("[ERROR] failed to read input ring buffer.");
+    }
+
+    self.input_ring_buffer.discard(self.hop_size);
+
+    // log!("overlap count: {}", self.overlap_count);
 
     for (i, elem) in self.tmp_buffer.iter().enumerate() {
       self.signal_buffer[i] = Cmp::new(elem * self.window[i] / self.overlap_count as f32, 0.0);
@@ -512,36 +504,46 @@ impl WasmProcessor {
     // スペクトルに変換
     self.frequency_buffer.clone_from_slice(&self.signal_buffer[..]);
     self.fft.process_with_scratch(&mut self.frequency_buffer, &mut self.fft_scratch_buffer);
+    scale_cmp(&mut self.frequency_buffer);
 
     // スペクトルを保存
     for i in 0..N {
       self.original_spectrum[i] = self.frequency_buffer[i];
     }
 
+    if WasmProcessor::get_buffer_effective_value_cmp(&self.original_spectrum) == 0.0 {
+      log!("[ERROR] invalid original_spectrum");
+    }
+
     // ピッチシフト前のスペクトルからスペクトル包絡を計算
     for (i, elem) in self.frequency_buffer.iter().enumerate() {
-      let amp = elem.abs();
+      let mut amp = elem.abs();
       if amp == 0.0 {
         amp = std::f32::EPSILON;
       }
 
-      self.tmp_fft_buffer[i] = Cmp::new(amp.log(), 0.0);
+      self.tmp_fft_buffer[i] = Cmp::new(amp.ln(), 0.0);
     }
 
     // ケプストラムを計算
     self.cepstrum_buffer.clone_from_slice(&self.tmp_fft_buffer[..]);
     self.ifft.process_with_scratch(&mut self.cepstrum_buffer, &mut self.ifft_scratch_buffer);
+    // scale_cmp(&mut self.cepstrum_buffer);
 
     // ケプストラムを保存
     for i in 0..N {
       self.original_cepstrum[i] = self.cepstrum_buffer[i];
     }
 
+    if WasmProcessor::get_buffer_effective_value_cmp(&self.original_cepstrum) == 0.0 {
+      log!("[ERROR] invalid original_cepstrum");
+    }
+
     // ケプストラムを liftering して
     // スペクトル包絡を取得
 
     self.tmp_fft_buffer[0] = self.cepstrum_buffer[0];
-    for i in 1..(N / 2) {
+    for i in 1..(N / 2 + 1) {
       let elem = if i < self.envelope_order {
         self.cepstrum_buffer[i]
       } else {
@@ -554,39 +556,44 @@ impl WasmProcessor {
 
     self.tmp_fft_buffer2.clone_from_slice(&self.tmp_fft_buffer[..]);
     self.fft.process_with_scratch(&mut self.tmp_fft_buffer2, &mut self.fft_scratch_buffer);
+    scale_cmp(&mut self.tmp_fft_buffer2);
 
     // スペクトル包絡を保存
     for i in 0..N {
       self.envelope[i] = self.tmp_fft_buffer2[i];
     }
 
+    if WasmProcessor::get_buffer_effective_value_cmp(&self.envelope) == 0.0 {
+      log!("[ERROR] invalid envelope");
+    }
+
     // フォルマントシフト
     {
-      self.tmp_fft_buffer.clone_from_slice(self.envelope[..]);
+      self.tmp_fft_buffer.clone_from_slice(&self.envelope[..]);
 
       for i in 0..(N / 2 + 1) {
         let shifted_pos = i as f32 / formant_expand_amount;
-        let left_index = shifted_pos.floor().to_int_unchecked::<usize>();
-        let right_index = shifted_pos.ceil().to_int_unchecked::<usize>();
+        let left_index = shifted_pos.floor() as usize;
+        let right_index = shifted_pos.ceil() as usize;
         let diff = shifted_pos - left_index as f32;
 
         let left_value = if left_index <= N / 2 {
           self.tmp_fft_buffer[left_index].re()
         } else {
-          -1000
+          -1000.0
         };
 
         let right_value = if right_index <= N / 2 {
           self.tmp_fft_buffer[right_index].re()
         } else {
-          -1000
+          -1000.0
         };
 
         let new_value = (1.0 - diff) * left_value + diff * right_value;
         self.envelope[i].re = new_value;
       }
 
-      for i in 1..(N / 2) {
+      for i in 1..(N / 2 + 1) {
         self.envelope[N - i].re = self.envelope[i].re;
       }
     }
@@ -608,7 +615,7 @@ impl WasmProcessor {
         let mut phase_diff = phase - self.prev_input_phases[i];
         self.prev_input_phases[i] = phase;
 
-        phase_diff = WasmProcessor::wrap_phase(phase_diff - bin_center_freq / hop_size as f32);
+        phase_diff = WasmProcessor::wrap_phase(phase_diff - bin_center_freq * hop_size as f32);
         let bin_deviation = phase_diff * N as f32 / hop_size as f32 / (2.0 * std::f32::consts::PI);
 
         self.analysis_magnitude[i] = magnitude;
@@ -617,7 +624,7 @@ impl WasmProcessor {
 
       // 周波数変更
       for i in 0..(N / 2 + 1) {
-        let shifted_bin = (i as f32 / pitch_change_amount + 0.5f32).floor().to_int_unchecked::<usize>();
+        let shifted_bin = (i as f32 / pitch_change_amount + 0.5f32).floor() as usize;
         if shifted_bin > N / 2 {
           break;
         }
@@ -627,8 +634,8 @@ impl WasmProcessor {
       }
 
       for i in 0..(N / 2 + 1) {
-        let bin_deviation = self.synthesis_frequencies[i] - i;
-        let phase_diff = bin_deviation * 2.0 * std::f32::consts::PI * hop_size as f32 / N as f32;
+        let bin_deviation = self.synthesis_frequencies[i] - i as f32;
+        let mut phase_diff = bin_deviation * 2.0 * std::f32::consts::PI * hop_size as f32 / N as f32;
         let bin_center_freq = 2.0 * std::f32::consts::PI * i as f32 / N as f32;
         phase_diff += bin_center_freq * hop_size as f32;
 
@@ -653,37 +660,38 @@ impl WasmProcessor {
     // ピッチシフト後のスペクトル
     self.shifted_spectrum.clone_from_slice(&self.frequency_buffer);
 
-    if pitch_change_amount < 1.0 {
-      let new_nyquist_pos = (N as f32 * 0.5 * pitch_change_amount).round().to_int_unchecked::<usize>();
+    // if pitch_change_amount < 1.0 {
+    //   let new_nyquist_pos = (N as f32 * 0.5 * pitch_change_amount).round() as usize;
 
-      for i in 0..(N / 2) {
-        if new_nyquist_pos + i >= (N / 2) {
-          break;
-        }
-        if new_nyquist_pos < i {
-          break;
-        }
+    //   for i in 0..(N / 2) {
+    //     if new_nyquist_pos + i >= (N / 2) {
+    //       break;
+    //     }
+    //     if new_nyquist_pos < i {
+    //       break;
+    //     }
 
-        self.frequency_buffer[new_nyquist_pos + i] = self.frequency_buffer[new_nyquist_pos - i];
-      }
+    //     self.frequency_buffer[new_nyquist_pos + i] = self.frequency_buffer[new_nyquist_pos - i];
+    //   }
 
-      for i in 1..(N / 2) {
-        self.frequency_buffer[N - i] = self.frequency_buffer[i];
-      }
-    }
+    //   for i in 1..(N / 2) {
+    //     self.frequency_buffer[N - i] = self.frequency_buffer[i];
+    //   }
+    // }
 
     // 微細構造の取り出し
     {
       for i in 0..N {
         let amp = self.frequency_buffer[i].abs();
-        let r = (amp + std::f32::EPSILON).log();
+        let r = (amp + std::f32::EPSILON).ln();
         self.tmp_fft_buffer[i] = Cmp::new(r, 0.0);
       }
 
       self.cepstrum_buffer.clone_from_slice(&self.tmp_fft_buffer);
       self.ifft.process_with_scratch(&mut self.cepstrum_buffer, &mut self.ifft_scratch_buffer);
+      // scale_cmp(&mut self.cepstrum_buffer);
 
-      self.tmp_fft_buffer[i] = Cmp::new(0.0, 0.0);
+      self.tmp_fft_buffer[0] = Cmp::new(0.0, 0.0);
       for i in 1..(N / 2 + 1) {
         let elem = if i >= self.envelope_order {
           self.cepstrum_buffer[i]
@@ -696,11 +704,16 @@ impl WasmProcessor {
       }
 
       self.tmp_fft_buffer2.clone_from_slice(&self.tmp_fft_buffer);
-      self.fft.process_with_scratch(&mut tmp_fft_buffer2, &mut self.fft_scratch_buffer);
+      self.fft.process_with_scratch(&mut self.tmp_fft_buffer2, &mut self.fft_scratch_buffer);
+      scale_cmp(&mut self.tmp_fft_buffer2);
+      
+      if WasmProcessor::get_buffer_effective_value_cmp(&self.tmp_fft_buffer2) == 0.0 {
+        log!("[ERROR] invalid fine structure");
+      }
 
       // ミラーした領域の微細構造は無視する
       if pitch_change_amount < 1.0 {
-        let new_nyquist_pos = (N as f32 * 0.5 * pitch_change_amount).round().to_int_unchecked();
+        let new_nyquist_pos = (N as f32 * 0.5 * pitch_change_amount).round() as usize;
 
         for i in new_nyquist_pos..(N / 2) {
           self.tmp_fft_buffer2[i] = Cmp::new(0.0, 0.0);
@@ -720,26 +733,55 @@ impl WasmProcessor {
     for i in 0..(N / 2 + 1) {
       let amp = (self.envelope[i].re() * envelope_amount + self.fine_structure[i].re() + fine_structure_amount).exp();
 
+      // log!("amp: {}", amp);
+
       self.frequency_buffer[i] = Cmp::new(
         amp * self.tmp_phase_buffer[i].cos(),
         amp * self.tmp_phase_buffer[i].sin()
       );
+
+      // log!("freq: {:?}", &self.frequency_buffer[i]);
     }
 
+    for i in 1..(N / 2) {
+      self.frequency_buffer[N - i] = self.frequency_buffer[i].conj();
+    }
+
+    // 再合成されたスペクトル
     for i in 0..N {
       self.synthesis_spectrum[i] = self.frequency_buffer[i];
     }
 
     self.signal_buffer.clone_from_slice(&self.frequency_buffer);
-    self.ifft.process_with_scratch(&mut signal_buffer, &mut self.fft_scratch_buffer);
+    self.ifft.process_with_scratch(&mut self.signal_buffer, &mut self.fft_scratch_buffer);
+    // scale_cmp(&mut self.signal_buffer);
+
+    let energy = WasmProcessor::get_buffer_effective_value_cmp(&self.signal_buffer);
+    if energy.is_nan() {
+      log!("freq buffer of NaN: {:?}", &self.frequency_buffer);
+    }
+    // log!("signal energy: {}", energy);
 
     for i in 0..N {
       self.tmp_buffer[i] = self.signal_buffer[i].re() * self.window[i]; 
     }
 
-    let overlap_add_result = self.output_ring_buffer.overlap_add(&self.tmp_buffer, N - hop_size);
+    if WasmProcessor::get_buffer_effective_value_f32(&self.tmp_buffer) == 0.0 {
+      log!("[ERROR] invalid output signal");
+    }
 
-    self.input_ring_buffer.discard(hop_size);    
+    // log!(
+    //   "overlap_add {}, {}, {}",
+    //   self.output_ring_buffer.num_readable(),
+    //   self.output_ring_buffer.num_writable(),
+    //   N - self.hop_size
+    // );
+    let overlap_add_result = self.output_ring_buffer.overlap_add(&self.tmp_buffer, N - self.hop_size);  
+    if !overlap_add_result {
+      log!("[ERROR] failed to overlapped add");
+    }
+
+    // log!("finish process fft block");
 
   }
 
@@ -752,23 +794,45 @@ impl WasmProcessor {
     }
   }
 
+  fn get_buffer_effective_value_f32(buf: &[f32]) -> f32 {
+    if buf.len() == 0 {
+      return 0.0;
+    }
+
+    let mean_squared = buf.iter().fold(0.0, |accum, item| accum + item) / buf.len() as f32;
+    mean_squared.sqrt()
+  }
+
+  fn get_buffer_effective_value_cmp(buf: &[Cmp]) -> f32 {
+    if buf.len() ==  0 {
+      return 0.0;
+    }
+
+    let mean_squared = buf.iter().fold(0.0, |accum, item| accum + item.norm_sqr()) / buf.len() as f32;
+    mean_squared.sqrt()
+  }
+
   pub fn set_dry_wet(&mut self, value: f32) {
     self.dry_wet = value;
   }
 
   pub fn set_output_gain_decibel(&mut self, value: f32) {
+    log!("new gain decibel value: {}", value);
     self.output_gain_decibel = value;
   }
 
   pub fn set_pitch_shift(&mut self, value: f32) {
+    log!("new pitch value: {}", value);
     self.pitch = value;
   }
 
   pub fn set_formant_shift(&mut self, value: f32) {
+    log!("new formant value: {}", value);
     self.formant = value;
   }
 
   pub fn set_envelope_order(&mut self, value: usize) {
+    log!("new envelope value: {}", value);
     self.envelope_order = value;
   }
 }

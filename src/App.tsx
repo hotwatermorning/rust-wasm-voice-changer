@@ -42,16 +42,15 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
         onChangeParameter={props.onChangeParameter}
         defaultValue={0}
         min={-48}
-        max={6}
+        max={12}
       />
       <SliderWithName
         name={"Pitch Shift"}
         parameterId={"pitch-shift"}
         onChangeParameter={props.onChangeParameter}
         defaultValue={0}
-        min={-1200}
-        max={1200}
-        step={1}
+        min={-2}
+        max={2}
       />
       <SliderWithName
         name={"Formant Shift"}
@@ -67,7 +66,7 @@ const Control: React.FC<{ onChangeParameter: (parameterId: string, value: number
         onChangeParameter={props.onChangeParameter}
         defaultValue={7}
         min={3}
-        max={30}
+        max={40}
         step={1}
       />
     </S.ParameterListLayout>
